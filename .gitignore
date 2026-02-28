@@ -1,0 +1,63 @@
+# ------------------------------
+# Python bytecode and caches
+# ------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ------------------------------
+# Build / packaging artifacts
+# ------------------------------
+build/
+dist/
+*.spec
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# ------------------------------
+# Test / lint / type-check caches
+# ------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ------------------------------
+# IDE / editor files
+# ------------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------
+# OS junk files
+# ------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ------------------------------
+# Project runtime outputs
+# ------------------------------
+data/
+supplementary_info_extracted/
+*.log
+
+# PsychoPy runtime/session artifacts (if generated)
+*.psydat
+
