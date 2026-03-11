@@ -4,11 +4,13 @@ import random
 import shutil
 import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from statistics import NormalDist, mean, pstdev
 from typing import Dict, List, Sequence
 
 import pandas as pd
+from PIL import Image
 from psychopy import core, data, event, gui, visual
 
 
@@ -230,6 +232,44 @@ def build_trials(n_trials: int, pools: Dict[str, List[Path]], go_ratio: float, r
     return trials
 
 
+@lru_cache(maxsize=256)
+def get_image_pixel_size(image_path: Path) -> tuple[int, int]:
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+            return max(1, int(width)), max(1, int(height))
+    except Exception:
+        return 512, 512
+
+
+def compute_display_image_size(win: visual.Window, image_path: Path) -> tuple[int, int]:
+    src_width, src_height = get_image_pixel_size(image_path)
+    win_width, win_height = [max(1, int(v)) for v in win.size]
+    max_width = max(1, int(win_width * 0.82))
+    max_height = max(1, int(win_height * 0.82))
+    scale = min(max_width / src_width, max_height / src_height)
+    return max(1, int(round(src_width * scale))), max(1, int(round(src_height * scale)))
+
+
+def create_experiment_window(windowed: bool) -> visual.Window:
+    common_kwargs = {
+        "size": [1280, 720],
+        "fullscr": not windowed,
+        "color": "black",
+        "units": "height",
+        "useFBO": False,
+    }
+    try:
+        return visual.Window(
+            winType="glfw",
+            multiSample=True,
+            numSamples=4,
+            **common_kwargs,
+        )
+    except Exception:
+        return visual.Window(**common_kwargs)
+
+
 def show_text(win: visual.Window, message: str, wait_keys: Sequence[str] = ("space",)) -> None:
     text = visual.TextStim(
         win=win,
@@ -258,6 +298,7 @@ def run_trial(
     event.clearEvents(eventType="keyboard")
     trial_clock = core.Clock()
     img_curr.image = str(trial.stimulus_path)
+    img_curr.size = compute_display_image_size(win, trial.stimulus_path)
     responded = False
     rt = None
     response = ""
@@ -268,6 +309,7 @@ def run_trial(
             alpha = max(0.0, min(1.0, t / fade_duration if fade_duration > 0 else 1.0))
             if prev_stimulus is not None:
                 img_prev.image = str(prev_stimulus)
+                img_prev.size = compute_display_image_size(win, prev_stimulus)
                 img_prev.opacity = 1.0 - alpha
                 img_prev.draw()
             img_curr.opacity = alpha
@@ -681,26 +723,26 @@ def run_phase(
         dummy_raw = raw_dir / f"DRYRUN_{phase_key}.csv"
         return dummy_raw, {}, True
 
-    win = visual.Window(
-        size=[1280, 720],
-        fullscr=not args.windowed,
-        color="black",
-        units="height",
-    )
+    win = create_experiment_window(args.windowed)
+    image_size = compute_display_image_size(win, pools["city"][0])
     img_prev = visual.ImageStim(
         win=win,
         image=str(pools["city"][0]),
-        size=(0.8, 0.8),
-        units="height",
-        mask="circle",
+        size=image_size,
+        units="pix",
+        mask="raisedCos",
+        maskParams={"fringeWidth": 0.08},
+        texRes=1024,
         interpolate=True,
     )
     img_curr = visual.ImageStim(
         win=win,
         image=str(pools["city"][0]),
-        size=(0.8, 0.8),
-        units="height",
-        mask="circle",
+        size=image_size,
+        units="pix",
+        mask="raisedCos",
+        maskParams={"fringeWidth": 0.08},
+        texRes=1024,
         interpolate=True,
     )
 
