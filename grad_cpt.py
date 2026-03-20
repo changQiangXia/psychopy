@@ -2,8 +2,10 @@
 import csv
 import random
 import shutil
+import time
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from statistics import NormalDist, mean, pstdev
@@ -17,6 +19,9 @@ from psychopy import core, data, event, gui, visual
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 SEX_OPTIONS = ["男", "女"]
 GRADE_OPTIONS = ["大一", "大二", "大三", "大四", "研一", "研二", "研三", "博一", "博二", "博三", "博四"]
+PRACTICE_FEEDBACK_DURATION = 0.35
+PRACTICE_PASS_THRESHOLD = 0.70
+MAX_IMAGE_UPSCALE = 1.5
 
 
 @dataclass
@@ -247,7 +252,7 @@ def compute_display_image_size(win: visual.Window, image_path: Path) -> tuple[in
     win_width, win_height = [max(1, int(v)) for v in win.size]
     max_width = max(1, int(win_width * 0.82))
     max_height = max(1, int(win_height * 0.82))
-    scale = min(max_width / src_width, max_height / src_height)
+    scale = min(max_width / src_width, max_height / src_height, MAX_IMAGE_UPSCALE)
     return max(1, int(round(src_width * scale))), max(1, int(round(src_height * scale)))
 
 
@@ -285,6 +290,49 @@ def show_text(win: visual.Window, message: str, wait_keys: Sequence[str] = ("spa
     if keys and keys[0] == "escape":
         raise ExperimentAborted("用户按下 ESC 终止实验")
 
+
+def format_abs_timestamp(abs_seconds: float | None) -> str:
+    if abs_seconds is None:
+        return ""
+    return datetime.fromtimestamp(abs_seconds).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def get_wall_time() -> float:
+    return time.time()
+
+
+def classify_response_result(condition: str, responded: bool) -> tuple[str, int, str]:
+    if condition == "city":
+        if responded:
+            return "Hit", 1, ""
+        return "Miss", 0, "omission"
+    if responded:
+        return "FA", 0, "commission"
+    return "CR", 1, ""
+
+
+def show_trial_feedback(
+    win: visual.Window,
+    message: str,
+    color: str,
+    duration_s: float = PRACTICE_FEEDBACK_DURATION,
+) -> None:
+    feedback = visual.TextStim(
+        win=win,
+        text=message,
+        color=color,
+        height=0.05,
+        bold=True,
+        pos=(0, -0.42),
+    )
+    feedback_clock = core.Clock()
+    while feedback_clock.getTime() < duration_s:
+        feedback.draw()
+        win.flip()
+        if "escape" in (event.getKeys(keyList=["escape"]) or []):
+            raise ExperimentAborted("用户按下 ESC 终止实验")
+
+
 def run_trial(
     win: visual.Window,
     img_prev: visual.ImageStim,
@@ -294,17 +342,27 @@ def run_trial(
     response_key: str,
     trial_duration: float,
     fade_duration: float,
+    show_feedback: bool = False,
+    feedback_duration: float = PRACTICE_FEEDBACK_DURATION,
 ) -> dict:
     event.clearEvents(eventType="keyboard")
     trial_clock = core.Clock()
     img_curr.image = str(trial.stimulus_path)
     img_curr.size = compute_display_image_size(win, trial.stimulus_path)
     responded = False
-    rt = None
+    rt_s = None
     response = ""
+    response_time_abs = None
+    trial_start_abs: dict[str, float | None] = {"value": None}
 
-    while trial_clock.getTime() < trial_duration:
-        t = trial_clock.getTime()
+    def mark_trial_start() -> None:
+        trial_start_abs["value"] = get_wall_time()
+
+    first_frame = True
+    while True:
+        t = 0.0 if first_frame else trial_clock.getTime()
+        if (not first_frame) and t >= trial_duration:
+            break
         if t <= fade_duration:
             alpha = max(0.0, min(1.0, t / fade_duration if fade_duration > 0 else 1.0))
             if prev_stimulus is not None:
@@ -317,6 +375,10 @@ def run_trial(
             img_curr.opacity = 1.0
 
         img_curr.draw()
+        if first_frame:
+            win.callOnFlip(trial_clock.reset)
+            win.callOnFlip(mark_trial_start)
+            first_frame = False
         win.flip()
 
         keys = event.getKeys(keyList=[response_key, "escape"], timeStamped=trial_clock)
@@ -326,24 +388,38 @@ def run_trial(
             if (not responded) and key_name == response_key:
                 responded = True
                 response = key_name
-                rt = key_time
+                rt_s = key_time
+                if trial_start_abs["value"] is not None:
+                    response_time_abs = trial_start_abs["value"] + key_time
 
-    correct = responded if trial.condition == "city" else (not responded)
-    if trial.condition == "mountain" and responded:
-        error_type = "commission"
-    elif trial.condition == "city" and not responded:
-        error_type = "omission"
-    else:
-        error_type = ""
+    response_result, correct, error_type = classify_response_result(trial.condition, responded)
+    trial_start_time = format_abs_timestamp(trial_start_abs["value"])
+    trial_end_abs = None if trial_start_abs["value"] is None else (trial_start_abs["value"] + trial_clock.getTime())
+    trial_end_time = format_abs_timestamp(trial_end_abs)
+    response_time = format_abs_timestamp(response_time_abs)
+    rt_ms = "" if rt_s is None else round(rt_s * 1000, 3)
+
+    if show_feedback:
+        show_trial_feedback(
+            win=win,
+            message="正确" if correct == 1 else "错误",
+            color="lime" if correct == 1 else "red",
+            duration_s=feedback_duration,
+        )
 
     return {
         "trial_index": trial.trial_index,
         "condition": trial.condition,
         "stimulus_file": trial.stimulus_path.name,
+        "response_result": response_result,
         "response_key": response,
         "responded": int(responded),
-        "rt_s": "" if rt is None else round(rt, 6),
-        "correct": int(correct),
+        "rt_ms": rt_ms,
+        "rt_s": "" if rt_s is None else round(rt_s, 6),
+        "trial_start_time": trial_start_time,
+        "trial_end_time": trial_end_time,
+        "response_time": response_time,
+        "correct": correct,
         "error_type": error_type,
         "trial_duration_s": trial_duration,
     }
@@ -358,6 +434,17 @@ def clamp_rate(rate: float, n: int) -> float:
     if rate >= 1:
         return 1 - eps
     return rate
+
+
+def extract_rt_ms(row: dict) -> float | None:
+    rt_ms = row.get("rt_ms", "")
+    if rt_ms not in ("", None):
+        return float(rt_ms)
+
+    rt_s = row.get("rt_s", "")
+    if rt_s in ("", None):
+        return None
+    return float(rt_s) * 1000.0
 
 
 def compute_behavior_metrics(rows: Sequence[dict]) -> dict:
@@ -376,9 +463,24 @@ def compute_behavior_metrics(rows: Sequence[dict]) -> dict:
     cer = (mountain_false_alarm / total_mountain) if total_mountain > 0 else 0.0
     oer = (city_omission / total_city) if total_city > 0 else 0.0
 
-    correct_city_rts = [float(r["rt_s"]) for r in city_rows if r["correct"] == 1 and r["rt_s"] != ""]
-    mean_rt = mean(correct_city_rts) if correct_city_rts else None
-    rtcv = pstdev(correct_city_rts) if len(correct_city_rts) >= 2 else (0.0 if len(correct_city_rts) == 1 else None)
+    correct_city_rts_ms = [
+        rt_ms
+        for r in city_rows
+        if r["correct"] == 1
+        for rt_ms in [extract_rt_ms(r)]
+        if rt_ms is not None
+    ]
+    mean_rt_ms = mean(correct_city_rts_ms) if correct_city_rts_ms else None
+    rtsd_ms = (
+        pstdev(correct_city_rts_ms)
+        if len(correct_city_rts_ms) >= 2
+        else (0.0 if len(correct_city_rts_ms) == 1 else None)
+    )
+    rtcv = (
+        (rtsd_ms / mean_rt_ms)
+        if mean_rt_ms not in (None, 0) and rtsd_ms is not None
+        else (0.0 if mean_rt_ms not in (None, 0) else None)
+    )
 
     hit_rate = (city_hit / total_city) if total_city > 0 else 0.0
     false_alarm_rate = (mountain_false_alarm / total_mountain) if total_mountain > 0 else 0.0
@@ -393,9 +495,11 @@ def compute_behavior_metrics(rows: Sequence[dict]) -> dict:
         "accuracy": round(accuracy, 6),
         "cer": round(cer, 6),
         "oer": round(oer, 6),
-        "mean_rt": "" if mean_rt is None else round(mean_rt, 6),
+        "mean_rt_ms": "" if mean_rt_ms is None else round(mean_rt_ms, 3),
+        "rtsd_ms": "" if rtsd_ms is None else round(rtsd_ms, 3),
         "rtcv": "" if rtcv is None else round(rtcv, 6),
         "d_prime": round(d_prime, 6),
+        "total_trials": len(rows),
         "city_trials": total_city,
         "mountain_trials": total_mountain,
     }
@@ -415,14 +519,78 @@ def save_rows_csv(rows: Sequence[dict], out_file: Path) -> None:
         writer.writerows(rows)
 
 
+def parse_numeric(value: object) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_result_table(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    if df.empty:
+        return df, False
+
+    normalized = df.copy()
+    changed = False
+    if "反应时标准差RTSD" not in normalized.columns:
+        insert_at = (
+            normalized.columns.get_loc("平均反应时RT") + 1
+            if "平均反应时RT" in normalized.columns
+            else len(normalized.columns)
+        )
+        normalized.insert(insert_at, "反应时标准差RTSD", "")
+        changed = True
+
+    for idx, row in normalized.iterrows():
+        mean_rt = parse_numeric(row.get("平均反应时RT", ""))
+        legacy_rtsd = parse_numeric(row.get("反应时变异RTCV", ""))
+        current_rtsd = str(row.get("反应时标准差RTSD", "")).strip()
+        if current_rtsd:
+            continue
+        if mean_rt is None or legacy_rtsd is None:
+            continue
+        if mean_rt > 10:
+            continue
+
+        normalized.at[idx, "平均反应时RT"] = round(mean_rt * 1000.0, 3)
+        normalized.at[idx, "反应时标准差RTSD"] = round(legacy_rtsd * 1000.0, 3)
+        normalized.at[idx, "反应时变异RTCV"] = "" if mean_rt == 0 else round(legacy_rtsd / mean_rt, 6)
+        changed = True
+
+    return normalized, changed
+
+
+def normalize_result_file(file_path: Path) -> None:
+    if not file_path.exists():
+        return
+    df = read_table(file_path)
+    normalized, changed = normalize_result_table(df)
+    if changed:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized.to_csv(file_path, index=False, encoding="utf-8-sig")
+
+
 def append_result_row(row: dict, file_path: Path) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not file_path.exists()
-    with file_path.open("a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    row_df = pd.DataFrame([row])
+    if not file_path.exists():
+        row_df.to_csv(file_path, index=False, encoding="utf-8-sig")
+        return
+
+    existing = read_table(file_path)
+    existing, _ = normalize_result_table(existing)
+    for col in row_df.columns:
+        if col not in existing.columns:
+            existing[col] = ""
+    for col in existing.columns:
+        if col not in row_df.columns:
+            row_df[col] = ""
+
+    ordered_cols = list(row_df.columns) + [col for col in existing.columns if col not in row_df.columns]
+    combined = pd.concat([existing[ordered_cols], row_df[ordered_cols]], ignore_index=True)
+    combined.to_csv(file_path, index=False, encoding="utf-8-sig")
 
 
 def read_table(path: Path) -> pd.DataFrame:
@@ -463,6 +631,7 @@ def rebuild_total_results(initial_file: Path, retest_file: Path, total_file: Pat
         "虚报率CER",
         "漏报率OER",
         "平均反应时RT",
+        "反应时标准差RTSD",
         "反应时变异RTCV",
         "辨别力d'",
     ]
@@ -473,6 +642,7 @@ def rebuild_total_results(initial_file: Path, retest_file: Path, total_file: Pat
         "虚报率CER",
         "漏报率OER",
         "平均反应时RT",
+        "反应时标准差RTSD",
         "反应时变异RTCV",
         "辨别力d'",
     ]
@@ -490,6 +660,7 @@ def rebuild_total_results(initial_file: Path, retest_file: Path, total_file: Pat
             "虚报率CER": "初测CER",
             "漏报率OER": "初测OER",
             "平均反应时RT": "初测RT",
+            "反应时标准差RTSD": "初测RTSD",
             "反应时变异RTCV": "初测RTCV",
             "辨别力d'": "初测d'",
         }
@@ -500,6 +671,7 @@ def rebuild_total_results(initial_file: Path, retest_file: Path, total_file: Pat
             "虚报率CER": "复测CER",
             "漏报率OER": "复测OER",
             "平均反应时RT": "复测RT",
+            "反应时标准差RTSD": "复测RTSD",
             "反应时变异RTCV": "复测RTCV",
             "辨别力d'": "复测d'",
         }
@@ -515,12 +687,14 @@ def rebuild_total_results(initial_file: Path, retest_file: Path, total_file: Pat
         "初测CER",
         "初测OER",
         "初测RT",
+        "初测RTSD",
         "初测RTCV",
         "初测d'",
         "复测时间",
         "复测CER",
         "复测OER",
         "复测RT",
+        "复测RTSD",
         "复测RTCV",
         "复测d'",
     ]
@@ -684,13 +858,16 @@ def run_phase(
         raise ValueError("--fade-duration must be <= --trial-duration")
 
     if phase_key == "practice":
-        n_trials = max(1, int(args.practice_seconds / args.trial_duration))
+        effective_trial_seconds = args.trial_duration + PRACTICE_FEEDBACK_DURATION
+        n_trials = max(1, int(args.practice_seconds / effective_trial_seconds))
         phase_title = "练习模式"
         intro = (
             "练习模式（1分钟）\n\n"
             "规则：\n"
             f"1. 城市图片按 {args.response_key}\n"
-            "2. 山地图片不按键\n\n"
+            "2. 山地图片不按键\n"
+            "3. 每题结束会显示“正确/错误”反馈\n"
+            f"4. 总正确率低于 {int(PRACTICE_PASS_THRESHOLD * 100)}% 视为任务理解失败\n\n"
             "按空格开始。"
         )
     elif phase_key == "initial":
@@ -731,8 +908,8 @@ def run_phase(
         size=image_size,
         units="pix",
         mask="raisedCos",
-        maskParams={"fringeWidth": 0.08},
-        texRes=1024,
+        maskParams={"fringeWidth": 0.02},
+        texRes=2048,
         interpolate=True,
     )
     img_curr = visual.ImageStim(
@@ -741,15 +918,15 @@ def run_phase(
         size=image_size,
         units="pix",
         mask="raisedCos",
-        maskParams={"fringeWidth": 0.08},
-        texRes=1024,
+        maskParams={"fringeWidth": 0.02},
+        texRes=2048,
         interpolate=True,
     )
 
     rows: List[dict] = []
     previous: Path | None = None
     completed = True
-    start_time = data.getDateStr(format="%Y-%m-%d %H:%M:%S")
+    start_time = format_abs_timestamp(get_wall_time())
     try:
         show_text(win, intro)
         for trial in trials:
@@ -762,6 +939,7 @@ def run_phase(
                 response_key=args.response_key,
                 trial_duration=args.trial_duration,
                 fade_duration=args.fade_duration,
+                show_feedback=(phase_key == "practice"),
             )
             row.update(
                 {
@@ -774,23 +952,29 @@ def run_phase(
                 }
             )
             rows.append(row)
-            previous = trial.stimulus_path
+            previous = None if phase_key == "practice" else trial.stimulus_path
     except ExperimentAborted:
         completed = False
     finally:
         metrics = compute_behavior_metrics(rows) if rows else {}
+        if metrics and phase_key == "practice":
+            metrics["practice_passed"] = bool(metrics["accuracy"] >= PRACTICE_PASS_THRESHOLD)
         if completed:
             end_msg = f"{phase_title}结束。\n\n按空格退出。"
             if metrics:
-                end_msg = (
-                    f"{phase_title}结束。\n\n"
-                    f"CER: {metrics.get('cer', '')}\n"
-                    f"OER: {metrics.get('oer', '')}\n"
-                    f"RT: {metrics.get('mean_rt', '')}\n"
-                    f"RTCV: {metrics.get('rtcv', '')}\n"
-                    f"d': {metrics.get('d_prime', '')}\n\n"
-                    "按空格退出。"
-                )
+                metric_lines = [
+                    f"总正确率: {metrics.get('accuracy', 0):.2%}",
+                    f"CER: {metrics.get('cer', '')}",
+                    f"OER: {metrics.get('oer', '')}",
+                    f"RT(ms): {metrics.get('mean_rt_ms', '')}",
+                    f"RTSD(ms): {metrics.get('rtsd_ms', '')}",
+                    f"RTCV: {metrics.get('rtcv', '')}",
+                    f"d': {metrics.get('d_prime', '')}",
+                ]
+                if phase_key == "practice":
+                    practice_status = "任务理解通过" if metrics.get("practice_passed") else "任务理解失败"
+                    metric_lines.insert(1, f"练习判定: {practice_status}")
+                end_msg = f"{phase_title}结束。\n\n" + "\n".join(metric_lines) + "\n\n按空格退出。"
             try:
                 show_text(win, end_msg)
             except ExperimentAborted:
@@ -832,11 +1016,12 @@ def run_initial(
         "姓名": participant.name,
         "性别": participant.sex,
         "年级": participant.grade,
-        "试次数": args.main_trials,
+        "试次数": metrics.get("total_trials", args.main_trials),
         "正确率": metrics.get("accuracy", ""),
         "虚报率CER": metrics.get("cer", ""),
         "漏报率OER": metrics.get("oer", ""),
-        "平均反应时RT": metrics.get("mean_rt", ""),
+        "平均反应时RT": metrics.get("mean_rt_ms", ""),
+        "反应时标准差RTSD": metrics.get("rtsd_ms", ""),
         "反应时变异RTCV": metrics.get("rtcv", ""),
         "辨别力d'": metrics.get("d_prime", ""),
         "完成状态": "完成" if completed else "中断",
@@ -897,11 +1082,12 @@ def run_retest(
         "姓名": participant.name,
         "性别": participant.sex,
         "年级": participant.grade,
-        "试次数": args.main_trials,
+        "试次数": metrics.get("total_trials", args.main_trials),
         "正确率": metrics.get("accuracy", ""),
         "虚报率CER": metrics.get("cer", ""),
         "漏报率OER": metrics.get("oer", ""),
-        "平均反应时RT": metrics.get("mean_rt", ""),
+        "平均反应时RT": metrics.get("mean_rt_ms", ""),
+        "反应时标准差RTSD": metrics.get("rtsd_ms", ""),
         "反应时变异RTCV": metrics.get("rtcv", ""),
         "辨别力d'": metrics.get("d_prime", ""),
         "完成状态": "完成" if completed else "中断",
@@ -918,7 +1104,7 @@ def run_practice(
     rng: random.Random,
     raw_dir: Path,
 ) -> None:
-    raw_file, _, _ = run_phase(
+    raw_file, metrics, completed = run_phase(
         phase_key="practice",
         participant=participant,
         pools=pools,
@@ -927,7 +1113,16 @@ def run_practice(
         raw_dir=raw_dir,
     )
     if not args.dry_run:
-        info_dialog("练习结束", f"练习原始数据已保存:\n{raw_file}")
+        if not completed:
+            message = f"练习已中断。\n原始数据: {raw_file}"
+        else:
+            practice_status = "任务理解通过" if metrics.get("practice_passed") else "任务理解失败"
+            message = (
+                f"{practice_status}\n"
+                f"总正确率: {metrics.get('accuracy', 0):.2%}\n"
+                f"练习原始数据: {raw_file}"
+            )
+        info_dialog("练习结束", message)
 
 
 def choose_main_menu() -> str | None:
@@ -1002,6 +1197,9 @@ def main() -> None:
     raw_dir, results_dir, total_file = ensure_dirs(data_dir)
     initial_file = results_dir / "初测结果.csv"
     retest_file = results_dir / "复测结果.csv"
+    normalize_result_file(initial_file)
+    normalize_result_file(retest_file)
+    rebuild_total_results(initial_file, retest_file, total_file)
 
     initial_pools = load_stimuli(material_root, phase_map["initial"])
     retest_pools = load_stimuli(material_root, phase_map["retest"])

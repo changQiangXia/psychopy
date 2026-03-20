@@ -55,9 +55,12 @@ Desktop.ini
 # Project runtime outputs
 # ------------------------------
 data/
+data_verify*/
 supplementary_info_extracted/
 *.log
 
+# Local requirement/augmentation materials
+augment/
+
 # PsychoPy runtime/session artifacts (if generated)
 *.psydat
-
