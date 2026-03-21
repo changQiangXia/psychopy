@@ -301,6 +301,31 @@ def get_wall_time() -> float:
     return time.time()
 
 
+def get_wall_timestamp() -> str:
+    return format_abs_timestamp(get_wall_time())
+
+
+def normalize_timestamp_string(value: object) -> str:
+    if value in ("", None):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    for parser in (
+        lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f"),
+        lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M:%S"),
+        datetime.fromisoformat,
+    ):
+        try:
+            parsed = parser(text)
+            return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        except (TypeError, ValueError):
+            continue
+    return text
+
+
 def classify_response_result(condition: str, responded: bool) -> tuple[str, int, str]:
     if condition == "city":
         if responded:
@@ -513,10 +538,19 @@ def save_rows_csv(rows: Sequence[dict], out_file: Path) -> None:
             writer.writerow(["empty"])
         return
 
+    time_fields = {"trial_start_time", "trial_end_time", "response_time", "start_time", "测试时间"}
+    normalized_rows = []
+    for row in rows:
+        normalized_row = dict(row)
+        for field in time_fields:
+            if field in normalized_row:
+                normalized_row[field] = normalize_timestamp_string(normalized_row[field])
+        normalized_rows.append(normalized_row)
+
     with out_file.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=list(normalized_rows[0].keys()))
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(normalized_rows)
 
 
 def parse_numeric(value: object) -> float | None:
@@ -534,6 +568,13 @@ def normalize_result_table(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
 
     normalized = df.copy()
     changed = False
+
+    if "测试时间" in normalized.columns:
+        normalized_times = normalized["测试时间"].map(normalize_timestamp_string)
+        if not normalized_times.equals(normalized["测试时间"]):
+            normalized["测试时间"] = normalized_times
+            changed = True
+
     if "反应时标准差RTSD" not in normalized.columns:
         insert_at = (
             normalized.columns.get_loc("平均反应时RT") + 1
@@ -926,7 +967,7 @@ def run_phase(
     rows: List[dict] = []
     previous: Path | None = None
     completed = True
-    start_time = format_abs_timestamp(get_wall_time())
+    start_time = get_wall_timestamp()
     try:
         show_text(win, intro)
         for trial in trials:
@@ -1010,7 +1051,7 @@ def run_initial(
         return
 
     row = {
-        "测试时间": data.getDateStr(format="%Y-%m-%d %H:%M:%S"),
+        "测试时间": get_wall_timestamp(),
         "阶段": "初测",
         "编号": participant.participant_id,
         "姓名": participant.name,
@@ -1076,7 +1117,7 @@ def run_retest(
         return
 
     row = {
-        "测试时间": data.getDateStr(format="%Y-%m-%d %H:%M:%S"),
+        "测试时间": get_wall_timestamp(),
         "阶段": "复测",
         "编号": participant.participant_id,
         "姓名": participant.name,

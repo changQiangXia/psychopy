@@ -235,7 +235,7 @@ python .\grad_cpt.py --prepare-materials
 - `participant_id`
 - `sex`
 - `grade`
-- `start_time`：本次 phase 的流程记录时间；在说明页显示前写入，同一次运行中的所有行相同
+- `start_time`：本次 phase 的流程记录时间；在说明页显示前写入，同一次运行中的所有行相同，格式 `YYYY-MM-DD HH:MM:SS.sss`
 
 补充说明：
 
@@ -272,6 +272,7 @@ python .\grad_cpt.py --prepare-materials
 
 空值说明：
 
+- `测试时间` 格式固定为 `YYYY-MM-DD HH:MM:SS.sss`
 - 若某次运行中没有任何“正确城市试次”（即没有可用于 RT 统计的 `Hit`），则 `平均反应时RT`、`反应时标准差RTSD`、`反应时变异RTCV` 为空
 - `试次数` 记录的是本次结果行实际纳入统计的试次数；若实验中断，该值可能小于配置试次数
 
@@ -285,6 +286,7 @@ python .\grad_cpt.py --prepare-materials
 
 补充说明：
 
+- `初测时间`、`复测时间` 格式固定为 `YYYY-MM-DD HH:MM:SS.sss`
 - 若某名被试仅完成初测或仅完成复测，另一阶段对应列保持为空
 
 ---
